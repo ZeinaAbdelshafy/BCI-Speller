@@ -1,51 +1,93 @@
 import numpy as np
-from psychopy import core, event
+from psychopy import visual, core, event
 from config import *
-from eeg_generator import generate_realistic_eeg
 from signal_processing import bandpass_filter, apply_asr, extract_band_powers, compute_zscore, calibrate_baseline
 from gui_concentration import ConcentrationBarGUI
+from lsl_streamer import UnicornLSLStreamer
 
 def main():
-    print(f" Generating {DURATION}s EEG @ {FS}Hz...")
-    _, raw_eeg = generate_realistic_eeg(FS, DURATION, N_CHANNELS, state='focused')
+    print("🚀 Starting Live Concentration Detector")
     
-    # 1. Filter & Clean
-    filtered = bandpass_filter(raw_eeg, FS, BANDPASS_LOW, BANDPASS_HIGH, FILTER_ORDER)
-    cleaned = apply_asr(filtered, FS, ASR_CALIB_S, ASR_WIN_S, ASR_CUTOFF)
+    # 1. Connect Unicorn
+    streamer = UnicornLSLStreamer(FS)
+    if not streamer.connect():
+        return
+    streamer.start()
     
-    # 2. Baseline Calibration
-    print(" Calibrating baseline...")
-    _, base_eeg = generate_realistic_eeg(FS, BASELINE_DURATION, N_CHANNELS, state='relaxed')
-    base_filtered = bandpass_filter(base_eeg, FS, BANDPASS_LOW, BANDPASS_HIGH, FILTER_ORDER)
-    base_cleaned = apply_asr(base_filtered, FS, ASR_CALIB_S, ASR_WIN_S, ASR_CUTOFF)
-    baseline_stats = calibrate_baseline(base_cleaned, FS, BASELINE_DURATION, WINDOW_S, STEP_S)
-    print(f" Baseline β/α: μ = {baseline_stats['mu']:.3f}, σ = {baseline_stats['sigma']:.3f}")
+    print("⏳ Buffering (3s)...")
+    core.wait(3.0)
+
+    # 2. Live Baseline Calibration
+    print(f"🔬 CALIBRATION ({BASELINE_DURATION}s) - Relax & close eyes...")
+    core.wait(1.0)
+    baseline_buffer = []
+    calib_clock = core.Clock()
+    while calib_clock.getTime() < BASELINE_DURATION:
+        win = streamer.get_window(0.5)
+        if win is not None:
+            baseline_buffer.append(win)
+        core.wait(0.1)
+
+    if not baseline_buffer:
+        print("❌ Calibration failed. No data received.")
+        streamer.stop()
+        return
+
+    base_eeg = np.hstack(baseline_buffer)
+    base_filt = bandpass_filter(base_eeg, FS, BANDPASS_LOW, BANDPASS_HIGH, FILTER_ORDER)
+    base_clean = apply_asr(base_filt, FS, ASR_CALIB_S, ASR_WIN_S, ASR_CUTOFF)
+    baseline_stats = calibrate_baseline(base_clean, FS, BASELINE_DURATION, WINDOW_S, STEP_S)
+    print(f"📊 Baseline μ={baseline_stats['mu']:.3f}, σ={baseline_stats['sigma']:.3f}")
+
+    # 3. GUI & State Management
+    gui = ConcentrationBarGUI(THRESHOLD_Z)
+    gui.win.setMouseVisible(False)
     
-    # 3. Initialize GUI
-    gui = ConcentrationBarGUI(baseline_stats['mu'], baseline_stats['sigma'], THRESHOLD_Z)
-    print("\n Running concentration tracking (Press ESC to exit)...")
-    
-    # 4. Real-time Loop
-    win_n = int(WINDOW_S * FS)
-    step_n = int(STEP_S * FS)
-    for start in range(0, cleaned.shape[1] - win_n, step_n):
-        seg = cleaned[:, start:start+win_n]
-        alpha_all, beta_all, _ = extract_band_powers(seg, FS, WINDOW_S)
-        alpha_post = np.mean(alpha_all[POSTERIOR_CHANNELS])  # ✅ Pz, PO7, Oz, PO8
-        beta_front = np.mean(beta_all[FRONTAL_CHANNELS])     # ✅ Fz, C3, Cz, C4
-        ratio = beta_front / (alpha_post + 1e-6)
-        z_score = compute_zscore(ratio, baseline_stats['mu'], baseline_stats['sigma'])
-        
-        gui.update(ratio, z_score)
-        
-        if event.getKeys(keyList=['escape']):
-            break
-        core.wait(0.01)
-        
-    print("\n✅ Session complete.")
-    
-    gui.close()
-    core.quit()
+    # State flags for future P300/SSVEP integration
+    STATE = {"concentration": True, "p300": False, "ssvep": False}
+    print("🟢 LIVE TRACKING ACTIVE | ESC to exit\n")
+
+    main_clock = core.Clock()
+    last_update = 0.0
+
+    try:
+        while True:
+            if event.getKeys(keyList=['escape']):
+                break
+
+            # --- EEG PROCESSING (Runs every STEP_S) ---
+            if STATE["concentration"] and main_clock.getTime() - last_update >= STEP_S:
+                window = streamer.get_window(WINDOW_S)
+                if window is not None:
+                    filt = bandpass_filter(window, FS, BANDPASS_LOW, BANDPASS_HIGH, FILTER_ORDER)
+                    clean = apply_asr(filt, FS, ASR_CALIB_S, ASR_WIN_S, ASR_CUTOFF)
+                    alpha, beta, _ = extract_band_powers(clean, FS, WINDOW_S)
+                    
+                    a_post = np.mean(alpha[POSTERIOR_CHANNELS])
+                    b_front = np.mean(beta[FRONTAL_CHANNELS])
+                    ratio = b_front / (a_post + 1e-6)
+                    z = compute_zscore(ratio, baseline_stats['mu'], baseline_stats['sigma'])
+                    
+                    gui.update(ratio, z)
+                last_update = main_clock.getTime()
+
+            # --- UNIFIED RENDER (Exactly 1 flip/frame) ---
+            if STATE["p300"]:
+                pass  # p300_module.draw() goes here later
+            if STATE["ssvep"]:
+                pass  # ssvep_module.draw() goes here later
+            if STATE["concentration"]:
+                pass  # gui already draws internally, but structure is ready
+            
+            gui.win.flip()  # ✅ Single point of screen update
+
+    except KeyboardInterrupt:
+        print("\n⏹️ Interrupted")
+    finally:
+        print("\n👋 Shutting down...")
+        streamer.stop()
+        gui.close()
+        core.quit()
 
 if __name__ == "__main__":
     main()
