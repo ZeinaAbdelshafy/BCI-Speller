@@ -3,6 +3,7 @@ import collections
 import threading
 from pylsl import StreamInlet, resolve_byprop
 from config import FS
+import threading
 
 class UnicornLSLStreamer:
     def __init__(self, fs=FS):
@@ -10,6 +11,7 @@ class UnicornLSLStreamer:
         self.inlet = None
         self.buffer = collections.deque(maxlen=int(fs * 10))  # 10s FIFO
         self.stop_event = threading.Event()
+        self._lock = threading.Lock() 
         self.channel_indices = list(range(8))  # Fallback
 
     def connect(self):
@@ -46,14 +48,19 @@ class UnicornLSLStreamer:
     def _loop(self):
         while not self.stop_event.is_set():
             samples, _ = self.inlet.pull_chunk(timeout=0.1, max_samples=32)
-            for s in samples:
-                self.buffer.append(s)
+            with self._lock:  # ✅ Protect batch writes
+                for s in samples:
+                    self.buffer.append(s)
+
 
     def get_window(self, seconds=2.0):
         n = int(seconds * self.fs)
-        if len(self.buffer) < n:
-            return None
-        return np.array(list(self.buffer)[-n:]).T[self.channel_indices, :]
+        with self._lock:
+            if len(self.buffer) < n:
+                return None
+            snapshot = list(self.buffer)[-n:]
+         # Heavy conversion happens OUTSIDE the lock
+        return np.array(snapshot).T[self.channel_indices, :]
 
     def stop(self):
         self.stop_event.set()
