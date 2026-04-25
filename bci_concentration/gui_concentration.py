@@ -1,7 +1,7 @@
 from psychopy import visual, core, event
 
 class ConcentrationBarGUI:
-    def __init__(self, baseline_mu, baseline_sigma, threshold_z=2.0):
+    def __init__(self, threshold_z=2.0): 
         # Window Setup: Larger size to fill screen (1600x900)
         self.win = visual.Window(size=(1600, 900), color='#050914', units='pix', fullscr=False)
         self.threshold_z = threshold_z
@@ -78,11 +78,21 @@ class ConcentrationBarGUI:
 
     def update(self, ratio, z_score):
         # 1. Update Concentration Bar
+
         fill_pct = max(0.0, min(1.0, (z_score - self.min_z) / (self.max_z - self.min_z)))
-        new_width = fill_pct * 1000
+        new_width = max(0.0, fill_pct * 1000)
         
-        self.conc_fill.width = new_width
-        self.conc_fill.pos = (-550 + new_width/2, 380)
+
+        if new_width < 2.0:
+            self.conc_fill.opacity = 0.0
+            self.conc_fill.width = 1.0  # Satisfies OpenGL min-dim requirement
+        else:
+            self.conc_fill.opacity = 1.0
+            self.conc_fill.width = new_width
+            self.conc_fill.pos = (-550 + new_width/2, 380)
+
+        self.pct_text.pos = (-550 + max(new_width, 10) + 15, 395)
+        self.pct_text.text = f'{int(fill_pct * 100)}%'
         
         # Color logic
         if z_score >= self.threshold_z:
@@ -113,7 +123,6 @@ class ConcentrationBarGUI:
         self.pct_text.draw()
         self.status_text.draw()
         
-        self.win.flip()
         
     def close(self):
         self.win.close()
