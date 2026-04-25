@@ -13,12 +13,21 @@ def main():
     if not streamer.connect():
         return
     streamer.start()
+    print("⏳ Waiting for data buffer to fill (3s worth)...")
+    wait_start = core.getTime()
+    while len(streamer.buffer) < 3 * FS:
+        if core.getTime() - wait_start > 10.0:
+            print("❌ Timeout: No data received after 10s. Check Bluetooth & LSL stream.")
+            streamer.stop()
+            return
+        core.wait(0.1)  # Yield CPU, avoid busy-spinning
+    print("✅ Buffer ready. Starting calibration...")
     
-    print("⏳ Buffering (3s)...")
+    print(" Buffering (3s)...")
     core.wait(3.0)
 
     # 2. Live Baseline Calibration
-    print(f"🔬 CALIBRATION ({BASELINE_DURATION}s) - Relax & close eyes...")
+    print(f" CALIBRATION ({BASELINE_DURATION}s) - Relax & close eyes...")
     core.wait(1.0)
     baseline_buffer = []
     calib_clock = core.Clock()
@@ -29,7 +38,7 @@ def main():
         core.wait(0.1)
 
     if not baseline_buffer:
-        print("❌ Calibration failed. No data received.")
+        print(" Calibration failed. No data received.")
         streamer.stop()
         return
 
